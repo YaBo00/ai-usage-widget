@@ -20,7 +20,9 @@ Clash 跟随：
 命令行可选：python ai_usage_widget.py <配置文件路径>   （用于测试，默认读取 config.json）
 """
 
+import ctypes
 import datetime
+import gzip
 import json
 import os
 import re
@@ -33,6 +35,16 @@ import urllib.request
 import webbrowser
 import tkinter as tk
 from tkinter import messagebox
+
+# 锁定时窗口鼠标穿透（Windows）
+GWL_EXSTYLE = -20
+WS_EX_TRANSPARENT = 0x00000020
+SWP_NOMOVE = 0x0002
+SWP_NOSIZE = 0x0001
+SWP_NOZORDER = 0x0004
+SWP_NOACTIVATE = 0x0010
+SWP_FRAMECHANGED = 0x0020
+_user32 = ctypes.windll.user32
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
@@ -52,7 +64,7 @@ DEFAULT_CONFIG = {
     "time_range": "today",             # 时间筛选：today / yesterday / week / month / all
     "page_path": "/",                  # 右键“打开后台”使用的路径
     "width": 330,
-    "alpha": 0.92,
+    "alpha": 0.78,
 }
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -151,9 +163,14 @@ def _clash_api_json(host, port, secret, path, timeout=2.5):
     return None
 
 
-def detect_clash_node():
-    """读取 Clash 当前选中的节点名。
+_node_cache = {"t": 0.0, "v": (None, "")}
+
+
+def detect_clash_node(max_age=60):
+    """读取 Clash 当前选中的节点名（带 60 秒缓存，避免每次刷新都探测）。
     返回 (节点名, 代理端口)；控制器未开启时节点名返回 None，端口来自本机端口探测。"""
+    if time.time() - _node_cache["t"] < max_age:
+        return _node_cache["v"]
     port = detect_proxy()
     port_num = ""
     if port:
@@ -162,11 +179,15 @@ def detect_clash_node():
             port_num = m.group(1)
     ctl = _parse_clash_controller()
     if not ctl:
-        return None, port_num
+        _node_cache["t"] = time.time()
+        _node_cache["v"] = (None, port_num)
+        return _node_cache["v"]
     host, cport, secret = ctl
     proxies = _clash_api_json(host, cport, secret, "/proxies")
     if not isinstance(proxies, dict) or not isinstance(proxies.get("proxies"), dict):
-        return None, port_num
+        _node_cache["t"] = time.time()
+        _node_cache["v"] = (None, port_num)
+        return _node_cache["v"]
     allp = proxies["proxies"]
     cur = "GLOBAL"
     for _ in range(8):
@@ -177,7 +198,9 @@ def detect_clash_node():
         if not now or now == cur:
             break
         cur = now
-    return cur, port_num
+    _node_cache["t"] = time.time()
+    _node_cache["v"] = (cur, port_num)
+    return _node_cache["v"]
 
 
 # ---------------------------------------------------------------- 配置
@@ -217,6 +240,7 @@ def http_get(url, token=None, timeout=12, proxy=""):
     req = urllib.request.Request(url, headers={
         "User-Agent": UA,
         "Accept": "application/json, text/html, */*",
+        "Accept-Encoding": "gzip",   # 该站日志接口一次返回全部记录（~1.6MB），gzip 可压缩 96%
     })
     if token:
         req.add_header("Authorization", "Bearer " + token)
@@ -226,7 +250,10 @@ def http_get(url, token=None, timeout=12, proxy=""):
     else:
         opener = urllib.request.build_opener()
     with opener.open(req, timeout=timeout) as resp:
-        return resp.read().decode("utf-8", "replace")
+        data = resp.read()
+        if (resp.headers.get("Content-Encoding") or "").lower() == "gzip":
+            data = gzip.decompress(data)
+        return data.decode("utf-8", "replace")
 
 
 def _try_get(url, cfg, token=None, timeout=12):
@@ -390,10 +417,10 @@ def _range_ts(cfg):
     return int(start.timestamp()), int(end.timestamp())
 
 
-def fetch_log_items(cfg, page_size=100, max_pages=50):
+def fetch_log_items(cfg, page_size=1000, max_pages=20):
     """拉取 /api/log/token 的全部可见调用日志。
-    实测该站接口忽略时间/分页参数，直接返回全部可见记录（最近约 4 天 900+ 条），
-    因此拉全量后由调用方在本地按时间过滤。"""
+    实测该站接口忽略时间参数、按 page_size 分页返回；page_size=1000 一次即可覆盖当前量级（900+ 条），
+    接口若忽略 page_size 也会一次返回全部。拉全量后由调用方在本地按时间过滤。"""
     site = normalize_url(cfg.get("site_url", ""))
     key = (cfg.get("api_key") or "").strip()
     if not site or not key:
@@ -401,28 +428,29 @@ def fetch_log_items(cfg, page_size=100, max_pages=50):
     items = []
     for page in range(1, max_pages + 1):
         url = ("{}/api/log/token?page={}&page_size={}".format(site, page, page_size))
-        text = _try_get(url, cfg, key, timeout=15)
+        text = _try_get(url, cfg, key, timeout=20)
         obj = json.loads(text)
         data = obj.get("data") if isinstance(obj, dict) else None
         if not isinstance(data, list) or not data:
             break
         items.extend(data)
         if len(data) != page_size:
-            break  # 接口忽略分页返回全部，视为已取完
+            break  # 已取完（不足一页或接口忽略分页返回全部）
     return items or None
 
 
 def fmt_tokens(n):
-    """token 量格式化：1.2M / 196.4k / 330"""
+    """token 量格式化：以万为单位（120万 / 19.6万 / 0.2万），不足一千显示原值"""
     try:
         n = float(n)
     except (TypeError, ValueError):
         return str(n)
-    if n >= 1e6:
-        return "{:.2f}M".format(n / 1e6)
-    if n >= 1e3:
-        return "{:.1f}k".format(n / 1e3)
-    return "{:.0f}".format(n)
+    if n < 1000:
+        return "{:.0f}".format(n)
+    w = n / 10000.0
+    if w >= 100:
+        return "{:.0f}万".format(w)
+    return "{:.1f}万".format(w)
 
 
 def fetch_usage(cfg):
@@ -471,8 +499,8 @@ class UsageWidget:
     def __init__(self, cfg):
         self.cfg = cfg
         self.bg = "#17181d"
-        self.fg = "#eceef1"
-        self.dim = "#9aa0ab"
+        self.fg = "#f5f7fa"
+        self.dim = "#b6bcc6"
         self.green = "#4fc26a"
         self.red = "#e05d5d"
         self.amber = "#e2b04e"
@@ -483,16 +511,21 @@ class UsageWidget:
         self.root.overrideredirect(True)
         self.root.attributes("-topmost", True)
         try:
-            self.root.attributes("-alpha", float(cfg.get("alpha", 0.92)))
+            self.root.attributes("-alpha", float(cfg.get("alpha", 0.78)))
         except Exception:
             pass
         self.width = int(cfg.get("width", 330))
         self.range_var = tk.StringVar(value=cfg.get("time_range", "today"))
 
+        self._locked = False
+        self._lock_popup = None
         self._restore_position()
         self._build_ui()
         self._bind_all_children()
         self.startup_var = tk.BooleanVar(value=self._startup_exists())
+
+        if self._locked:
+            self._set_locked(True)
 
         self.root.after(150, self.refresh_now)
 
@@ -510,25 +543,29 @@ class UsageWidget:
         hdr = tk.Frame(self.frame, bg=self.bg)
         hdr.pack(fill="x", padx=12, pady=(8, 0))
         self.dot = tk.Label(hdr, text="●", bg=self.bg, fg=self.gray,
-                            font=("Microsoft YaHei UI", 8))
+                            font=("Microsoft YaHei UI", 9))
         self.dot.pack(side="left")
         self.title_lbl = tk.Label(hdr, text=self._range_title(),
                                   bg=self.bg, fg=self.fg,
-                                  font=("Microsoft YaHei UI", 10, "bold"))
+                                  font=("Microsoft YaHei UI", 11, "bold"))
         self.title_lbl.pack(side="left", padx=6)
         self.time_lbl = tk.Label(hdr, text="--:--:--", bg=self.bg, fg=self.dim,
-                                 font=("Consolas", 9))
-        self.time_lbl.pack(side="right")
+                                 font=("Consolas", 10))
+        self.lock_btn = tk.Label(hdr, text="🔓", bg=self.bg, fg=self.dim,
+                                 font=("Segoe UI Emoji", 10), cursor="hand2")
+        self.lock_btn.pack(side="right", padx=(0, 2))
+        self.lock_btn.bind("<Button-1>", lambda e: self._toggle_lock())
+        self.time_lbl.pack(side="right", padx=(0, 8))
 
-        self.meta_lbl = tk.Label(self.frame, text="", bg=self.bg, fg="#6b7078",
-                                 font=("Microsoft YaHei UI", 8), justify="left", anchor="w")
+        self.meta_lbl = tk.Label(self.frame, text="", bg=self.bg, fg="#8a909b",
+                                 font=("Microsoft YaHei UI", 9), justify="left", anchor="w")
         self.meta_lbl.pack(fill="x", padx=12, pady=(0, 0))
 
         self.row_frame = tk.Frame(self.frame, bg=self.bg)
         self.row_frame.pack(fill="x", padx=12, pady=(4, 0))
 
         self.status_lbl = tk.Label(self.frame, text="", bg=self.bg, fg=self.red,
-                                   font=("Microsoft YaHei UI", 9),
+                                   font=("Microsoft YaHei UI", 10),
                                    justify="left", anchor="w",
                                    wraplength=self.width - 24)
         self.status_lbl.pack(fill="x", padx=12, pady=(2, 6))
@@ -544,21 +581,22 @@ class UsageWidget:
             r = tk.Frame(self.row_frame, bg=self.bg)
             r.pack(fill="x", pady=1)
             tk.Label(r, text=label, bg=self.bg, fg=self.dim, anchor="w",
-                     font=("Microsoft YaHei UI", 10)).pack(side="left")
+                     font=("Microsoft YaHei UI", 10, "bold")).pack(side="left")
             # 右侧值从右往左排：最后一个是主值（白色粗体），前面的附值（token）灰色小字
             for i, v in enumerate(reversed(values)):
                 if i == 0:
                     tk.Label(r, text=v, bg=self.bg, fg="#ffffff", anchor="e",
-                             font=("Consolas", 11, "bold")).pack(side="right")
+                             font=("Consolas", 12, "bold")).pack(side="right")
                 else:
                     tk.Label(r, text=v, bg=self.bg, fg=self.dim, anchor="e",
-                             font=("Consolas", 9)).pack(side="right", padx=(0, 6))
+                             font=("Consolas", 10)).pack(side="right", padx=(0, 6))
         self._resize()
 
     def _resize(self):
         self.root.update_idletasks()
         h = self.root.winfo_reqheight()
         self.root.geometry("{}x{}+{}+{}".format(self.width, h, self.pos[0], self.pos[1]))
+        self._sync_lock_popup()
 
     def _restore_position(self):
         x, y = self.root.winfo_screenwidth() - self.width - 30, 30
@@ -566,6 +604,7 @@ class UsageWidget:
             with open(STATE_PATH, "r", encoding="utf-8") as f:
                 st = json.load(f)
             x, y = int(st.get("x", x)), int(st.get("y", y))
+            self._locked = bool(st.get("locked", False))
         except Exception:
             pass
         self.pos = (x, y)
@@ -573,13 +612,16 @@ class UsageWidget:
     def _save_position(self):
         try:
             with open(STATE_PATH, "w", encoding="utf-8") as f:
-                json.dump({"x": self.pos[0], "y": self.pos[1]}, f)
+                json.dump({"x": self.pos[0], "y": self.pos[1],
+                           "locked": bool(getattr(self, "_locked", False))}, f)
         except Exception:
             pass
 
     # ---------- 交互 ----------
     def _bind_all_children(self):
         def bind_rec(w):
+            if w is self.lock_btn:
+                return  # 锁按钮只响应自己的点击（切换锁定），不参与拖动/菜单
             w.bind("<ButtonPress-1>", self._on_press)
             w.bind("<B1-Motion>", self._on_drag)
             w.bind("<Double-Button-1>", self._on_double)
@@ -595,6 +637,71 @@ class UsageWidget:
         x, y = e.x_root - self._dx, e.y_root - self._dy
         self.pos = (x, y)
         self.root.geometry("+{}+{}".format(x, y))
+        self._sync_lock_popup()
+
+    # ---------- 锁定（右上角锁：锁定时整窗鼠标穿透，只能点锁解锁） ----------
+    def _hwnd(self):
+        w = self.root.winfo_id()
+        p = _user32.GetParent(w)
+        return p if p else w
+
+    def _set_click_through(self, on):
+        try:
+            hwnd = self._hwnd()
+            ex = _user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+            if on:
+                ex |= WS_EX_TRANSPARENT
+            else:
+                ex &= ~WS_EX_TRANSPARENT
+            _user32.SetWindowLongW(hwnd, GWL_EXSTYLE, ex)
+            _user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0,
+                                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER |
+                                 SWP_NOACTIVATE | SWP_FRAMECHANGED)
+        except Exception:
+            pass
+
+    def _toggle_lock(self):
+        self._set_locked(not self._locked)
+
+    def _set_locked(self, locked):
+        self._locked = locked
+        self._set_click_through(locked)
+        if locked:
+            self.lock_btn.config(text="🔒")
+            self._ensure_lock_popup()
+        else:
+            self.lock_btn.config(text="🔓")
+            if self._lock_popup is not None:
+                try:
+                    self._lock_popup.destroy()
+                except Exception:
+                    pass
+                self._lock_popup = None
+        self._save_position()
+
+    def _ensure_lock_popup(self):
+        """锁定后主窗穿透，需要一个小而可点的独立窗口承载锁图标，点击它解锁"""
+        if self._lock_popup is not None:
+            return
+        p = tk.Toplevel(self.root)
+        p.overrideredirect(True)
+        p.attributes("-topmost", True)
+        p.configure(bg=self.bg)
+        lbl = tk.Label(p, text="🔒", bg=self.bg, fg="#ffffff",
+                       font=("Segoe UI Emoji", 11), cursor="hand2")
+        lbl.pack()
+        lbl.bind("<Button-1>", lambda e: self._toggle_lock())
+        self._lock_popup = p
+        self._sync_lock_popup()
+
+    def _sync_lock_popup(self):
+        if self._lock_popup is None:
+            return
+        try:
+            self._lock_popup.geometry("+{}+{}".format(
+                self.pos[0] + self.width - 30, self.pos[1] + 6))
+        except Exception:
+            pass
 
     def _on_double(self, e):
         webbrowser.open(normalize_url(self.cfg.get("site_url", "")) +
@@ -714,7 +821,18 @@ class UsageWidget:
     # ---------- 刷新 ----------
     def refresh_now(self):
         self.dot.config(fg=self.amber)
+        self._fetching = True
+        self._fetch_seq = getattr(self, "_fetch_seq", 0) + 1
+        self._my_seq = self._fetch_seq
         threading.Thread(target=self._worker, daemon=True).start()
+        # 超时守卫：45 秒还没完成就标红提示，避免一直黄
+        self.root.after(45000, lambda: self._watchdog(self._my_seq))
+
+    def _watchdog(self, seq):
+        if getattr(self, "_fetching", False) and seq == getattr(self, "_fetch_seq", 0):
+            self._fetching = False
+            self.dot.config(fg=self.red)
+            self.status_lbl.config(text="⚠ 刷新超时（节点可能慢或不通），等待下次自动刷新")
 
     def _worker(self):
         rows, err = fetch_usage(self.cfg)
@@ -722,6 +840,7 @@ class UsageWidget:
         self.root.after(0, lambda: self._apply(rows, err, node, port))
 
     def _apply(self, rows, err, node=None, port=""):
+        self._fetching = False
         self.time_lbl.config(text=time.strftime("%H:%M:%S"))
         meta = ""
         if port:

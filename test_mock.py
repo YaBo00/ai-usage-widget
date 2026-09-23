@@ -22,11 +22,11 @@ def main():
     mock_server.start()
     ok = True
 
-    # 今天：deepseek 1.5M + glm 0.2M = 模型聚合，按金额降序；token=输入+输出
+    # 今天：deepseek 1.5M + glm 0.2M = 模型聚合，按金额降序；token=输入+输出（万单位）
     rows, err = m.fetch_usage(dict(BASE, time_range="today"))
     ok &= check("today 按模型聚合",
                 rows and rows[0][0] == "deepseek-v4.1-flash" and rows[0][1] == "$3.00"
-                and rows[0][2] == "1.7k" and rows[1][0] == "glm-5.3" and rows[1][1] == "$0.4000"
+                and rows[0][2] == "0.2万" and rows[1][0] == "glm-5.3" and rows[1][1] == "$0.4000"
                 and rows[1][2] == "220",
                 str(rows) + " " + str(err))
 

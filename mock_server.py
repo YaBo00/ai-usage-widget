@@ -11,23 +11,28 @@ NOW = datetime.datetime.now(TZ)
 TODAY0 = NOW.replace(hour=0, minute=0, second=0, microsecond=0)
 
 # 模拟调用日志：今天 2 条 deepseek + 1 条 glm，昨天 1 条 kimi
+# 时间戳相对当前时刻生成（偏移为负），保证任意时间运行测试都落在"今天/昨天"范围内
+T1 = NOW - datetime.timedelta(minutes=40)
+T2 = NOW - datetime.timedelta(minutes=30)
+T3 = NOW - datetime.timedelta(minutes=20)
+Y1 = NOW - datetime.timedelta(days=1)
 LOG_ITEMS = [
-    {"id": 1, "user_id": 1, "created_at": int((TODAY0 + datetime.timedelta(hours=10)).timestamp()),
+    {"id": 1, "user_id": 1, "created_at": int(T1.timestamp()),
      "username": "mock", "token_name": "t", "model_name": "deepseek-v4.1-flash",
      "quota": 1000000, "prompt_tokens": 1000, "completion_tokens": 100,
      "use_time": 3, "is_stream": True, "channel": 1, "token_id": 1,
      "group": "g", "ip": "1.1.1.1", "request_id": "r1"},
-    {"id": 2, "user_id": 1, "created_at": int((TODAY0 + datetime.timedelta(hours=11)).timestamp()),
+    {"id": 2, "user_id": 1, "created_at": int(T2.timestamp()),
      "username": "mock", "token_name": "t", "model_name": "deepseek-v4.1-flash",
      "quota": 500000, "prompt_tokens": 500, "completion_tokens": 50,
      "use_time": 2, "is_stream": True, "channel": 1, "token_id": 1,
      "group": "g", "ip": "1.1.1.1", "request_id": "r2"},
-    {"id": 3, "user_id": 1, "created_at": int((TODAY0 + datetime.timedelta(hours=12)).timestamp()),
+    {"id": 3, "user_id": 1, "created_at": int(T3.timestamp()),
      "username": "mock", "token_name": "t", "model_name": "glm-5.3",
      "quota": 200000, "prompt_tokens": 200, "completion_tokens": 20,
      "use_time": 1, "is_stream": True, "channel": 2, "token_id": 1,
      "group": "g", "ip": "1.1.1.1", "request_id": "r3"},
-    {"id": 4, "user_id": 1, "created_at": int((TODAY0 - datetime.timedelta(hours=1)).timestamp()),
+    {"id": 4, "user_id": 1, "created_at": int(Y1.timestamp()),
      "username": "mock", "token_name": "t", "model_name": "kimi-k3",
      "quota": 300000, "prompt_tokens": 300, "completion_tokens": 30,
      "use_time": 2, "is_stream": True, "channel": 3, "token_id": 1,

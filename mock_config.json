@@ -1,0 +1,13 @@
+{
+  "site_url": "http://127.0.0.1:8899",
+  "api_key": "sk-mock",
+  "refresh_seconds": 10,
+  "mode": "auto",
+  "display_name": "AI 中转站（模拟）",
+  "quota_per_unit": 500000,
+  "currency": "¥",
+  "show_converted": true,
+  "page_path": "/",
+  "width": 330,
+  "alpha": 0.95
+}

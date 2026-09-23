@@ -1,0 +1,17 @@
+# 配置文件含真实 API Key，禁止上传
+config.json
+config.local.json
+
+# 运行时状态
+widget_state.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 环境变量/密钥
+.env
+.env.*

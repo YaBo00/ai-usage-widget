@@ -1,0 +1,15 @@
+{
+  "site_url": "https://api.aizzz.xyz",
+  "api_key": "sk-你的KEY",
+  "refresh_seconds": 300,
+  "mode": "token_usage",
+  "display_name": "AIZZZ 用量",
+  "quota_per_unit": 500000,
+  "currency": "$",
+  "show_converted": true,
+  "proxy": "auto",
+  "time_range": "today",
+  "page_path": "/usage-logs/common",
+  "width": 330,
+  "alpha": 0.92
+}
